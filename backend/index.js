@@ -67,11 +67,13 @@ const upload = multer({ storage: storage });
 
 // Database Connection with Retry Logic
 const pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
     user: process.env.POSTGRES_USER,
     host: process.env.DB_HOST || 'localhost',
     database: process.env.POSTGRES_DB,
     password: process.env.POSTGRES_PASSWORD,
-    port: 5432,
+    port: process.env.DB_PORT || 5432,
+    ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
 });
 
 const connectWithRetry = () => {
@@ -96,7 +98,8 @@ app.post('/api/upload', upload.single('image'), (req, res) => {
         return res.status(400).json({ error: 'No image uploaded' });
     }
 
-    const imageUrl = `http://127.0.0.1:5050/uploads/${req.file.filename}`;
+    const protocol = req.protocol === 'https' ? 'https' : 'http';
+    const imageUrl = `${protocol}://${req.get('host')}/uploads/${req.file.filename}`;
     console.log('Image uploaded successfully:', imageUrl);
     res.json({ imageUrl });
 });
