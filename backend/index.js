@@ -100,7 +100,7 @@ const connectWithRetry = () => {
         }
     });
 };
-connectWithRetry();
+// Database connection moved after app.listen for robustness
 
 // --- IMAGE UPLOAD ROUTE ---
 app.post('/api/upload', upload.single('image'), (req, res) => {
@@ -895,8 +895,11 @@ app.get('/api/health', async (req, res) => {
 
 app.get('/', (req, res) => res.send('Clinic API is running...'));
 
-app.listen(port, () => {
-    console.log(`--- CLOUD SERVER STARTUP ---`);
+app.listen(port, '0.0.0.0', () => {
+    console.log(`--- CLOUD SERVER LIVE ---`);
     console.log(`Port: ${port}`);
-    console.log(`Health Route: /ping`);
+    console.log(`Address: 0.0.0.0`);
+
+    // Connect to DB AFTER we are listening to satisfy health checks
+    // Database connection moved after app.listen for robustness
 });

@@ -5,8 +5,8 @@ import axios from 'axios';
 import * as ImagePicker from 'expo-image-picker';
 
 const { width } = Dimensions.get('window');
-const API_URL = 'https://loyal-insight-production.up.railway.app/api'; // Production server
-// const API_URL = 'http://localhost:5050/api'; 
+const API_URL = 'http://localhost:5050/api'; // Local Fix (Use this for now!)
+// const API_URL = 'https://loyal-insight-production.up.railway.app/api'; 
 
 const FRONTEND_DEFAULT_SLOTS = [
     "09:00 AM", "09:30 AM", "10:00 AM", "10:30 AM", "11:00 AM", "11:30 AM",
