@@ -5,7 +5,7 @@ import axios from 'axios';
 import * as ImagePicker from 'expo-image-picker';
 
 const { width } = Dimensions.get('window');
-const API_URL = 'http://192.168.1.14:5050/api'; // Use local IP for mobile testing
+const API_URL = 'https://loyal-insight-production.up.railway.app/api'; // Production server URL
 // const API_URL = 'http://localhost:5050/api';
 
 const FRONTEND_DEFAULT_SLOTS = [
