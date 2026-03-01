@@ -1,16 +1,24 @@
 {
-    "expo": {
-        "name": "clinic-frontend",
-        "slug": "clinic-frontend",
-        "version": "1.0.0",
-        "sdkVersion": "54.0.0",
-        "platforms": [
-            "ios",
-            "android",
-            "web"
-        ],
-        "web": {
-            "bundler": "webpack"
-        }
+  "expo": {
+    "name": "clinic-frontend",
+    "slug": "clinic-frontend",
+    "version": "1.0.0",
+    "sdkVersion": "54.0.0",
+    "platforms": [
+      "ios",
+      "android",
+      "web"
+    ],
+    "web": {
+      "bundler": "webpack"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "ed7d7cb2-8386-4f91-b3d0-226db4ffb8ce"
+      }
+    },
+    "android": {
+      "package": "com.ma_enger.clinicapp"
     }
+  }
 }
