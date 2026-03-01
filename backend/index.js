@@ -109,13 +109,8 @@ app.post('/api/upload', upload.single('image'), (req, res) => {
 // Register User
 app.post('/api/auth/register', async (req, res) => {
     const { phoneNumber, password, role, fullName, specialty, hospital, location, profileImageUrl, gender } = req.body;
-    console.log('--- REGISTRATION REQUEST ---');
-    console.log('Phone:', phoneNumber);
-    console.log('Role:', role);
-    console.log('Name:', fullName);
-    console.log('Gender:', gender);
-    console.log('Location:', location);
-
+    console.log('--- DB REGISTRATION REQUEST ---');
+    
     try {
         if (role === 'DOCTOR' && !profileImageUrl) {
             return res.status(400).json({ error: 'Profile image is required for doctors' });
@@ -123,38 +118,33 @@ app.post('/api/auth/register', async (req, res) => {
 
         const hashedPassword = await bcrypt.hash(password, 10);
 
-        // --- FALLBACK DATABASE (JSON FILE) ---
-        const localDbPath = path.join(__dirname, 'users.json');
-        let users = [];
-        if (fs.existsSync(localDbPath)) {
-            users = JSON.parse(fs.readFileSync(localDbPath, 'utf8'));
+        // 1. Insert into users table
+        const userResult = await pool.query(
+            'INSERT INTO users (phone_number, password_hash, role) VALUES ($1, $2, $3) RETURNING id',
+            [phoneNumber, hashedPassword, role]
+        );
+        const userId = userResult.rows[0].id;
+
+        // 2. Insert into role-specific table
+        if (role === 'DOCTOR') {
+            await pool.query(
+                `INSERT INTO doctors (user_id, full_name, specialty, hospital, location, profile_image_url) 
+                 VALUES ($1, $2, $3, $4, $5, $6)`,
+                [userId, fullName, specialty || 'General', hospital || 'Main Hospital', location || 'City Center', profileImageUrl]
+            );
+        } else {
+            await pool.query(
+                'INSERT INTO patients (user_id, full_name, gender, date_of_birth) VALUES ($1, $2, $3, $4)',
+                [userId, fullName, gender || 'Not Specified', '1990-01-01']
+            );
         }
 
-        // Check if user already exists
-        if (users.find(u => u.phone_number === phoneNumber)) {
-            return res.status(400).json({ error: 'User already exists' });
-        }
-
-        const newUser = {
-            id: Date.now(),
-            phone_number: phoneNumber,
-            password_hash: hashedPassword,
-            role,
-            full_name: fullName,
-            specialty: specialty || 'General',
-            hospital: hospital || 'Main Hospital',
-            location: location || 'City Center',
-            profile_image_url: profileImageUrl,
-            gender: gender || 'Not Specified'
-        };
-
-        users.push(newUser);
-        fs.writeFileSync(localDbPath, JSON.stringify(users, null, 2));
-        // --- END FALLBACK ---
-
-        res.status(201).json({ message: 'User registered successfully! (Stored locally)' });
+        res.status(201).json({ message: 'User registered successfully in Cloud!' });
     } catch (err) {
         console.error('Registration error:', err);
+        if (err.code === '23505') {
+            return res.status(400).json({ error: 'User with this phone number already exists' });
+        }
         res.status(500).json({ error: err.message });
     }
 });
@@ -162,17 +152,33 @@ app.post('/api/auth/register', async (req, res) => {
 // Login User
 app.post('/api/auth/login', async (req, res) => {
     const { phoneNumber, password } = req.body;
-    console.log('Login attempt for phone:', phoneNumber);
+    console.log('DB Login attempt for:', phoneNumber);
 
     try {
-        // --- FALLBACK DATABASE (JSON FILE) ---
-        const localDbPath = path.join(__dirname, 'users.json');
-        let users = [];
-        if (fs.existsSync(localDbPath)) {
-            users = JSON.parse(fs.readFileSync(localDbPath, 'utf8'));
-        }
+        // Query user and join with role-specific table to get full_name and image
+        const query = `
+            SELECT u.*, 
+                   COALESCE(d.full_name, p.full_name) as full_name,
+                   d.profile_image_url
+            FROM users u
+            LEFT KEY JOIN doctors d ON u.id = d.user_id
+            LEFT KEY JOIN patients p ON u.id = p.user_id
+            WHERE u.phone_number = $1
+        `;
+        // Fixing the JOIN syntax error I almost made
+        const fixedQuery = `
+            SELECT u.*, 
+                   COALESCE(d.full_name, p.full_name) as full_name,
+                   d.profile_image_url
+            FROM users u
+            LEFT JOIN doctors d ON u.id = d.user_id
+            LEFT JOIN patients p ON u.id = p.user_id
+            WHERE u.phone_number = $1
+        `;
 
-        const user = users.find(u => u.phone_number === phoneNumber);
+        const result = await pool.query(fixedQuery, [phoneNumber]);
+        const user = result.rows[0];
+
         if (!user) return res.status(400).json({ error: 'User not found' });
 
         const isMatch = await bcrypt.compare(password, user.password_hash);
@@ -180,17 +186,16 @@ app.post('/api/auth/login', async (req, res) => {
 
         const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '1d' });
 
-        console.log('Login successful for:', user.full_name);
         res.json({
             token,
             role: user.role,
             id: user.id,
-            name: user.full_name,
+            name: user.full_name || 'User',
             image: user.profile_image_url || ''
         });
     } catch (err) {
         console.error('Login error:', err);
-        res.status(500).json({ error: err.message });
+        res.status(500).json({ error: 'Login failed: ' + err.message });
     }
 });
 
@@ -199,32 +204,11 @@ app.post('/api/auth/login', async (req, res) => {
 // Get Doctors
 app.get('/api/doctors', async (req, res) => {
     try {
-        const localDbPath = path.join(__dirname, 'users.json');
-        let localDoctors = [];
-        if (fs.existsSync(localDbPath)) {
-            const users = JSON.parse(fs.readFileSync(localDbPath, 'utf8'));
-            localDoctors = users.filter(u => u.role === 'DOCTOR').map(u => ({
-                id: u.id,
-                full_name: u.full_name,
-                specialty: u.specialty,
-                hospital: u.hospital,
-                location: u.location,
-                profile_image_url: u.profile_image_url
-            }));
-        }
-
-        let dbDoctors = [];
-        try {
-            const result = await pool.query('SELECT * FROM doctors');
-            dbDoctors = result.rows;
-        } catch (e) {
-            console.log('Database disconnected, using local search...');
-        }
-
-        const allDoctors = [...localDoctors, ...dbDoctors];
-        res.json(allDoctors);
+        const result = await pool.query('SELECT * FROM doctors ORDER BY full_name ASC');
+        res.json(result.rows);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        console.error('Error fetching doctors:', err);
+        res.status(500).json({ error: 'Failed to fetch doctors from Cloud' });
     }
 });
 
