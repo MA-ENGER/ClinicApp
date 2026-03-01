@@ -109,23 +109,19 @@ app.post('/api/upload', upload.single('image'), (req, res) => {
 // Register User
 app.post('/api/auth/register', async (req, res) => {
     const { phoneNumber, password, role, fullName, specialty, hospital, location, profileImageUrl, gender } = req.body;
-    console.log('--- DB REGISTRATION REQUEST ---');
-    
-    try {
-        if (role === 'DOCTOR' && !profileImageUrl) {
-            return res.status(400).json({ error: 'Profile image is required for doctors' });
-        }
+    console.log('--- CLOUD REGISTRATION ---');
 
+    try {
         const hashedPassword = await bcrypt.hash(password, 10);
 
-        // 1. Insert into users table
-        const userResult = await pool.query(
-            'INSERT INTO users (phone_number, password_hash, role) VALUES ($1, $2, $3) RETURNING id',
-            [phoneNumber, hashedPassword, role]
+        // 1. Insert into users
+        const uRes = await pool.query(
+            'INSERT INTO users (phone_number, full_name, password_hash, role) VALUES ($1, $2, $3, $4) RETURNING id',
+            [phoneNumber, fullName, hashedPassword, role]
         );
-        const userId = userResult.rows[0].id;
+        const userId = uRes.rows[0].id;
 
-        // 2. Insert into role-specific table
+        // 2. Role-specific info
         if (role === 'DOCTOR') {
             await pool.query(
                 `INSERT INTO doctors (user_id, full_name, specialty, hospital, location, profile_image_url) 
@@ -139,50 +135,33 @@ app.post('/api/auth/register', async (req, res) => {
             );
         }
 
-        res.status(201).json({ message: 'User registered successfully in Cloud!' });
+        res.status(201).json({ message: 'User registered successfully!' });
     } catch (err) {
-        console.error('Registration error:', err);
-        if (err.code === '23505') {
-            return res.status(400).json({ error: 'User with this phone number already exists' });
-        }
-        res.status(500).json({ error: err.message });
+        console.error('Registration failed:', err);
+        if (err.code === '23505') return res.status(400).json({ error: 'Number already exists. Please login.' });
+        res.status(500).json({ error: 'Server registration error: ' + err.message });
     }
 });
 
 // Login User
 app.post('/api/auth/login', async (req, res) => {
     const { phoneNumber, password } = req.body;
-    console.log('DB Login attempt for:', phoneNumber);
+    console.log('Login request for:', phoneNumber);
 
     try {
-        // Query user and join with role-specific table to get full_name and image
         const query = `
-            SELECT u.*, 
-                   COALESCE(d.full_name, p.full_name) as full_name,
-                   d.profile_image_url
-            FROM users u
-            LEFT KEY JOIN doctors d ON u.id = d.user_id
-            LEFT KEY JOIN patients p ON u.id = p.user_id
-            WHERE u.phone_number = $1
-        `;
-        // Fixing the JOIN syntax error I almost made
-        const fixedQuery = `
-            SELECT u.*, 
-                   COALESCE(d.full_name, p.full_name) as full_name,
-                   d.profile_image_url
+            SELECT u.*, d.profile_image_url 
             FROM users u
             LEFT JOIN doctors d ON u.id = d.user_id
-            LEFT JOIN patients p ON u.id = p.user_id
             WHERE u.phone_number = $1
         `;
-
-        const result = await pool.query(fixedQuery, [phoneNumber]);
+        const result = await pool.query(query, [phoneNumber]);
         const user = result.rows[0];
 
-        if (!user) return res.status(400).json({ error: 'User not found' });
+        if (!user) return res.status(400).json({ error: 'User number not found. Please register first.' });
 
         const isMatch = await bcrypt.compare(password, user.password_hash);
-        if (!isMatch) return res.status(400).json({ error: 'Invalid credentials' });
+        if (!isMatch) return res.status(400).json({ error: 'Incorrect password. (Try 12345678 if you reset it)' });
 
         const token = jwt.sign({ id: user.id, role: user.role }, JWT_SECRET, { expiresIn: '1d' });
 
@@ -195,7 +174,7 @@ app.post('/api/auth/login', async (req, res) => {
         });
     } catch (err) {
         console.error('Login error:', err);
-        res.status(500).json({ error: 'Login failed: ' + err.message });
+        res.status(500).json({ error: 'Authentication service error: ' + err.message });
     }
 });
 
