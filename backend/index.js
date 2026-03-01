@@ -15,24 +15,25 @@ if (!fs.existsSync(uploadDir)) {
 }
 
 const app = express();
-const port = process.env.PORT || 5050; // Railway uses process.env.PORT
+const port = process.env.PORT || Number(8080); // Ensure port is a number if possible
 const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_key_123';
-const SERVER_VERSION = '1.1.0-cloud-fix';
+const SERVER_VERSION = '1.1.1-cloud-ping-only';
 
 console.log('--- SYSTEM STARTUP ---');
 console.log('Version:', SERVER_VERSION);
-console.log('Listen Port:', port);
+console.log('Port from env:', process.env.PORT);
+console.log('Using port:', port);
 console.log('DB URL Defined:', !!process.env.DATABASE_URL);
 
 app.get('/ping', (req, res) => {
-    console.log('Ping received');
     res.json({
-        status: 'alive',
+        status: 'UP',
         version: SERVER_VERSION,
-        port: port,
         time: new Date().toISOString()
     });
 });
+
+app.get('/', (req, res) => res.send('API is active. Version ' + SERVER_VERSION));
 
 const DEFAULT_SLOTS = [
     "09:00 AM", "09:30 AM", "10:00 AM", "10:30 AM", "11:00 AM", "11:30 AM",

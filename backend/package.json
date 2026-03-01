@@ -16,6 +16,9 @@
     "multer": "^2.0.2",
     "pg": "^8.11.3"
   },
+  "engines": {
+    "node": ">=18"
+  },
   "devDependencies": {
     "nodemon": "^3.0.1"
   }
