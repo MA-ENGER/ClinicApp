@@ -4,7 +4,7 @@
   "description": "Backend for Clinical Booking System",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js",
+    "start": "node backend/index.js",
     "dev": "nodemon index.js"
   },
   "dependencies": {
