@@ -895,4 +895,7 @@ app.get('/api/health', async (req, res) => {
 
 app.get('/', (req, res) => res.send('Clinic API is running...'));
 
-app.listen(port, '0.0.0.0', () => console.log(`Server running on port ${port} bound to 0.0.0.0`));
+app.listen(port, () => {
+    console.log(`--- SERVER LIVE ---`);
+    console.log(`Port: ${port}`);
+});
