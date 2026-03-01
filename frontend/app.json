@@ -19,6 +19,13 @@
     },
     "android": {
       "package": "com.ma_enger.clinicapp"
-    }
+    },
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/ed7d7cb2-8386-4f91-b3d0-226db4ffb8ce"
+    },
+    "ios": {}
   }
 }
