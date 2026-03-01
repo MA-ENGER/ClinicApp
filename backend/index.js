@@ -895,8 +895,8 @@ app.get('/api/health', async (req, res) => {
 
 app.get('/', (req, res) => res.send('Clinic API is running...'));
 
-app.listen(port, '0.0.0.0', () => {
+app.listen(port, () => {
     console.log(`--- CLOUD SERVER STARTUP ---`);
-    console.log(`Bound to: 0.0.0.0:${port}`);
+    console.log(`Port: ${port}`);
     console.log(`Health Route: /ping`);
 });
