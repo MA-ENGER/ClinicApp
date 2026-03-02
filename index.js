@@ -217,71 +217,54 @@ app.get('/api/doctors', async (req, res) => {
 });
 
 // Get Doctor Details & Availability slots
+// Get Doctor Details & Availability slots
 app.get('/api/doctors/:id/slots', async (req, res) => {
     const doctorId = req.params.id;
-    const { date } = req.query; // Get date from query param
+    const { date } = req.query;
 
-    // Use provided date or default to today (YYYY-MM-DD)
     const now = new Date();
-    const today = date || (now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0'));
-
-    // Parse the date components manually to avoid UTC/Local shifts
+    let today = date || now.toISOString().split('T')[0];
     const [y, m, d] = today.split('-').map(Number);
     const requestedDate = new Date(y, m - 1, d);
-    const dayOfWeek = requestedDate.getDay(); // 0-6 (Sun-Sat)
+    const dayOfWeek = requestedDate.getDay();
 
     console.log('Checking availability for:', today, 'Doctor:', doctorId, 'Day:', dayOfWeek);
 
     try {
-        const localUsersPath = path.join(__dirname, 'users.json');
+        // 1. Get Doctor's schedule_settings from DB
+        const drRes = await pool.query('SELECT schedule_settings FROM doctors WHERE id = $1 OR user_id = $1 LIMIT 1', [doctorId]);
+
         let doctorSettings = {
             available_slots: DEFAULT_SLOTS,
-            off_days: [5, 6] // Default off: Fri, Sat
+            off_days: [5, 6]
         };
 
-        if (fs.existsSync(localUsersPath)) {
-            const users = JSON.parse(fs.readFileSync(localUsersPath, 'utf8'));
-            const doctor = users.find(u => String(u.id) === String(doctorId));
-            if (doctor && doctor.schedule_settings) {
-                doctorSettings = doctor.schedule_settings;
-            }
+        if (drRes.rows.length > 0 && drRes.rows[0].schedule_settings) {
+            doctorSettings = drRes.rows[0].schedule_settings;
+            console.log('Using DB schedule settings for doctor:', doctorId);
         }
 
-        // If today is an off day, return empty slots
-        if (doctorSettings.off_days.includes(dayOfWeek)) {
-            return res.json([]);
-        }
-
-        // Fetch booked slots from local storage
-        const localApptPath = path.join(__dirname, 'appointments.json');
+        // 2. Already booked times (from DB)
         let bookedTimes = [];
-        if (fs.existsSync(localApptPath)) {
-            const allAppts = JSON.parse(fs.readFileSync(localApptPath, 'utf8'));
-            bookedTimes = allAppts
-                .filter(a => String(a.doctor_id) === String(doctorId) && a.appointment_time.startsWith(today))
-                .map(a => a.appointment_time.split(' ')[1] + ' ' + a.appointment_time.split(' ')[2]);
-        }
+        const dbAppts = await pool.query(
+            "SELECT appointment_time FROM appointments WHERE (doctor_id = $1 OR doctor_id = (SELECT id FROM doctors WHERE user_id = $1 LIMIT 1)) AND TO_CHAR(appointment_time, 'YYYY-MM-DD') = $2 AND status != 'CANCELLED'",
+            [doctorId, today]
+        );
+        bookedTimes = dbAppts.rows.map(a => {
+            const timePart = new Date(a.appointment_time).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
+            return timePart;
+        });
 
-        // Try to fetch booked slots from DB
-        try {
-            const dbAppts = await pool.query(
-                'SELECT appointment_time FROM appointments WHERE doctor_id = (SELECT id FROM doctors WHERE user_id = $1 OR id = $1 LIMIT 1) AND appointment_time LIKE $2',
-                [doctorId, today + '%']
-            );
-            const dbTimes = dbAppts.rows.map(a => a.appointment_time.split(' ')[1] + ' ' + a.appointment_time.split(' ')[2]);
-            bookedTimes = [...new Set([...bookedTimes, ...dbTimes])];
-        } catch (e) {
-            console.log('DB slots check skipped');
-        }
-
-        // Create slots with availability status based on doctor's OWN slots
-        const slotsWithStatus = doctorSettings.available_slots.map(slot => ({
+        const isOffDay = doctorSettings.off_days.includes(dayOfWeek);
+        const slotsWithStatus = isOffDay ? [] : doctorSettings.available_slots.map(slot => ({
             time: slot,
             isAvailable: !bookedTimes.includes(slot)
         }));
 
         res.json(slotsWithStatus);
+
     } catch (err) {
+        console.error('Error fetching slots:', err);
         res.status(500).json({ error: err.message });
     }
 });
@@ -290,28 +273,20 @@ app.get('/api/doctors/:id/slots', async (req, res) => {
 app.get('/api/doctors/:id/settings', async (req, res) => {
     const doctorId = req.params.id;
     try {
-        const localUsersPath = path.join(__dirname, 'users.json');
+        const result = await pool.query('SELECT schedule_settings FROM doctors WHERE id = $1 OR user_id = $1 LIMIT 1', [doctorId]);
+
         let schedule_settings = {
             available_slots: DEFAULT_SLOTS,
-            off_days: [5, 6],
-            slot_duration: 30,
-            start_work: "09:00",
-            end_work: "17:00"
+            off_days: [5, 6]
         };
-        let default_all_slots = DEFAULT_SLOTS;
 
-        if (fs.existsSync(localUsersPath)) {
-            const users = JSON.parse(fs.readFileSync(localUsersPath, 'utf8'));
-            const doctor = users.find(u => String(u.id) === String(doctorId));
-            if (doctor && doctor.schedule_settings) {
-                schedule_settings = doctor.schedule_settings;
-                const startM = toMins(schedule_settings.start_work || '09:00');
-                const endM = toMins(schedule_settings.end_work || '17:00');
-                default_all_slots = generateSlotPool(schedule_settings.slot_duration || 30, startM, endM);
-            }
+        if (result.rows.length > 0 && result.rows[0].schedule_settings) {
+            schedule_settings = result.rows[0].schedule_settings;
         }
-        res.json({ schedule_settings, default_all_slots });
+
+        res.json({ schedule_settings, default_all_slots: DEFAULT_SLOTS });
     } catch (err) {
+        console.error('Error fetching settings:', err);
         res.status(500).json({ error: err.message });
     }
 });
@@ -321,19 +296,20 @@ app.put('/api/doctors/:id/settings', async (req, res) => {
     const doctorId = req.params.id;
     const settings = req.body;
     try {
-        const localUsersPath = path.join(__dirname, 'users.json');
-        if (fs.existsSync(localUsersPath)) {
-            const users = JSON.parse(fs.readFileSync(localUsersPath, 'utf8'));
-            const idx = users.findIndex(u => String(u.id) === String(doctorId));
-            if (idx !== -1) {
-                users[idx].schedule_settings = settings;
-                fs.writeFileSync(localUsersPath, JSON.stringify(users, null, 2));
-                return res.json({ success: true });
-            }
+        const updateRes = await pool.query(
+            'UPDATE doctors SET schedule_settings = $1 WHERE id = $2 OR user_id = $2 RETURNING id',
+            [JSON.stringify(settings), doctorId]
+        );
+
+        if (updateRes.rows.length === 0) {
+            return res.status(404).json({ error: 'Doctor not found' });
         }
-        res.status(404).json({ error: 'Doctor not found' });
+
+        console.log('Successfully updated DB schedule settings for doctor:', doctorId);
+        res.json({ success: true, message: 'Settings saved to cloud!' });
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        console.error('Error saving settings:', err);
+        res.status(500).json({ error: 'Cloud Save Error: ' + err.message });
     }
 });
 
