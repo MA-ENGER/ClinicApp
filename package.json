@@ -2,10 +2,10 @@
   "name": "clinic-app-root",
   "version": "1.0.0",
   "description": "Clinical Booking System Root",
-  "main": "backend/index.js",
+  "main": "index.js",
   "scripts": {
-    "start": "node backend/index.js",
-    "dev": "nodemon backend/index.js"
+    "start": "node index.js",
+    "dev": "nodemon index.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
