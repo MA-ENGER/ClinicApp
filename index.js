@@ -319,160 +319,75 @@ app.post('/api/appointments', async (req, res) => {
     console.log('Incoming Booking Request:', { doctorId, patientId, time });
 
     try {
-        // --- PREVENTION OF DOUBLE BOOKING ---
-        // 1. Check local DB first
-        const localApptPath = path.join(__dirname, 'appointments.json');
-        let localAppts = [];
-        if (fs.existsSync(localApptPath)) {
-            localAppts = JSON.parse(fs.readFileSync(localApptPath, 'utf8'));
-        }
+        // 1. Resolve Doctor & Patient IDs (they might be User IDs)
+        const drRes = await pool.query('SELECT id FROM doctors WHERE user_id = $1 OR id = $1 LIMIT 1', [doctorId]);
+        if (drRes.rows.length === 0) return res.status(404).json({ error: 'Doctor not found' });
+        const realDrId = drRes.rows[0].id;
 
-        const isLocallyTaken = localAppts.find(a => String(a.doctor_id) === String(doctorId) && a.appointment_time === time);
-        if (isLocallyTaken) {
+        const paRes = await pool.query('SELECT id FROM patients WHERE user_id = $1 OR id = $1 LIMIT 1', [patientId]);
+        if (paRes.rows.length === 0) return res.status(404).json({ error: 'Patient not found' });
+        const realPaId = paRes.rows[0].id;
+
+        // 2. Check for double booking
+        const checkRes = await pool.query(
+            'SELECT id FROM appointments WHERE doctor_id = $1 AND appointment_time = $2 AND status != $3',
+            [realDrId, time, 'CANCELLED']
+        );
+
+        if (checkRes.rows.length > 0) {
             return res.status(400).json({ error: 'This time slot is already booked. Please choose another time.' });
         }
 
-        // 2. Try DB check if available
-        try {
-            const dbCheck = await pool.query(
-                'SELECT * FROM appointments WHERE doctor_id = (SELECT id FROM doctors WHERE user_id = $1 OR id = $1 LIMIT 1) AND appointment_time = $2',
-                [doctorId, time]
-            );
-            if (dbCheck.rows.length > 0) {
-                return res.status(400).json({ error: 'This slot is already reserved in our system.' });
-            }
+        // 3. Save to DB
+        const insertRes = await pool.query(
+            'INSERT INTO appointments (doctor_id, patient_id, appointment_time, notes) VALUES ($1, $2, $3, $4) RETURNING *',
+            [realDrId, realPaId, time, notes]
+        );
 
-            // SMART RESOLVE: If doctorId is a USER_ID, find the DOCTOR_ID
-            const docCheck = await pool.query('SELECT id FROM doctors WHERE user_id = $1', [doctorId]);
-            if (docCheck.rows.length > 0) {
-                console.log('Resolved doctor UserID to ProfileID');
-                doctorId = docCheck.rows[0].id;
-            }
+        console.log('Successfully booked appointment on cloud:', insertRes.rows[0].id);
+        res.status(201).json({ success: true, appointment: insertRes.rows[0] });
 
-            // SMART RESOLVE: If patientId is a USER_ID, find the PATIENT_ID
-            const patCheck = await pool.query('SELECT id FROM patients WHERE user_id = $1', [patientId]);
-            if (patCheck.rows.length > 0) {
-                console.log('Resolved patient UserID to ProfileID');
-                patientId = patCheck.rows[0].id;
-            }
-
-            const result = await pool.query(
-                'INSERT INTO appointments (doctor_id, patient_id, appointment_time, notes) VALUES ($1, $2, $3, $4) RETURNING *',
-                [doctorId, patientId, time, notes]
-            );
-            return res.status(201).json(result.rows[0]);
-        } catch (dbErr) {
-            console.log('DB Collision check/booking skipped or failed, using local storage fallback...');
-        }
-
-        // --- LOCAL FALLBACK SAVE ---
-        const newAppt = {
-            id: Date.now(),
-            doctor_id: doctorId,
-            patient_id: patientId,
-            appointment_time: time,
-            notes: notes,
-            created_at: new Date().toISOString()
-        };
-
-        localAppts.push(newAppt);
-        fs.writeFileSync(localApptPath, JSON.stringify(localAppts, null, 2));
-
-        res.status(201).json(newAppt);
     } catch (err) {
-        console.error('Booking Error:', err.message);
-        res.status(400).json({ error: 'Process Error: ' + err.message });
+        console.error('Booking failed:', err);
+        res.status(500).json({ error: 'Database Booking Error: ' + err.message });
     }
 });
 
 // Get Patient Appointments
 app.get('/api/appointments/patient/:patientId', async (req, res) => {
-    let { patientId } = req.params;
+    const { patientId } = req.params;
     try {
-        let dbAppts = [];
-        try {
-            // Resolve if UserID
-            const patCheck = await pool.query('SELECT id FROM patients WHERE user_id = $1', [patientId]);
-            let resolvedId = patientId;
-            if (patCheck.rows.length > 0) resolvedId = patCheck.rows[0].id;
-
-            const result = await pool.query(
-                'SELECT a.*, d.full_name as doctor_name, d.specialty FROM appointments a JOIN doctors d ON a.doctor_id = d.id WHERE a.patient_id = $1 ORDER BY appointment_time DESC',
-                [resolvedId]
-            );
-            dbAppts = result.rows;
-        } catch (e) {
-            console.log('DB Appointment Fetch failed, checking local storage...');
-        }
-
-        // --- LOCAL FALLBACK ---
-        const localApptPath = path.join(__dirname, 'appointments.json');
-        const localUsersPath = path.join(__dirname, 'users.json');
-        let localAppts = [];
-        if (fs.existsSync(localApptPath)) {
-            const allAppts = JSON.parse(fs.readFileSync(localApptPath, 'utf8'));
-            const allUsers = fs.existsSync(localUsersPath) ? JSON.parse(fs.readFileSync(localUsersPath, 'utf8')) : [];
-
-            localAppts = allAppts
-                .filter(a => String(a.patient_id) === String(patientId))
-                .map(a => {
-                    const doctor = allUsers.find(u => String(u.id) === String(a.doctor_id));
-                    return {
-                        ...a,
-                        doctor_name: doctor ? doctor.full_name : 'Unknown Doctor',
-                        specialty: doctor ? doctor.specialty : 'General'
-                    };
-                });
-        }
-
-        res.json([...localAppts, ...dbAppts]);
+        const result = await pool.query(
+            `SELECT a.*, d.full_name as doctor_name, d.specialty, d.profile_image_url 
+             FROM appointments a 
+             JOIN doctors d ON a.doctor_id = d.id 
+             WHERE a.patient_id = (SELECT id FROM patients WHERE user_id = $1 OR id = $1 LIMIT 1)
+             ORDER BY appointment_time DESC`,
+            [patientId]
+        );
+        res.json(result.rows);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        console.error('Error fetching patient appts:', err);
+        res.status(500).json({ error: 'Database Error: ' + err.message });
     }
 });
 
 // Get Doctor Appointments
 app.get('/api/appointments/doctor/:doctorId', async (req, res) => {
-    let { doctorId } = req.params;
+    const { doctorId } = req.params;
     try {
-        let dbAppts = [];
-        try {
-            // Resolve if UserID
-            const docCheck = await pool.query('SELECT id FROM doctors WHERE user_id = $1', [doctorId]);
-            let resolvedId = doctorId;
-            if (docCheck.rows.length > 0) resolvedId = docCheck.rows[0].id;
-
-            const result = await pool.query(
-                'SELECT a.*, p.full_name as patient_name FROM appointments a JOIN patients p ON a.patient_id = p.id WHERE a.doctor_id = $1 ORDER BY appointment_time DESC',
-                [resolvedId]
-            );
-            dbAppts = result.rows;
-        } catch (e) {
-            console.log('DB Doctor Appointment Fetch failed, checking local storage...');
-        }
-
-        // --- LOCAL FALLBACK ---
-        const localApptPath = path.join(__dirname, 'appointments.json');
-        const localUsersPath = path.join(__dirname, 'users.json');
-        let localAppts = [];
-        if (fs.existsSync(localApptPath)) {
-            const allAppts = JSON.parse(fs.readFileSync(localApptPath, 'utf8'));
-            const allUsers = fs.existsSync(localUsersPath) ? JSON.parse(fs.readFileSync(localUsersPath, 'utf8')) : [];
-
-            localAppts = allAppts
-                .filter(a => String(a.doctor_id) === String(doctorId))
-                .map(a => {
-                    const patient = allUsers.find(u => String(u.id) === String(a.patient_id));
-                    return {
-                        ...a,
-                        patient_name: patient ? patient.full_name : 'Patient'
-                    };
-                });
-        }
-
-        res.json([...localAppts, ...dbAppts]);
+        const result = await pool.query(
+            `SELECT a.*, p.full_name as patient_name 
+             FROM appointments a 
+             JOIN patients p ON a.patient_id = p.id 
+             WHERE a.doctor_id = (SELECT id FROM doctors WHERE user_id = $1 OR id = $1 LIMIT 1)
+             ORDER BY appointment_time DESC`,
+            [doctorId]
+        );
+        res.json(result.rows);
     } catch (err) {
-        res.status(500).json({ error: err.message });
+        console.error('Error fetching doctor appts:', err);
+        res.status(500).json({ error: 'Database Error: ' + err.message });
     }
 });
 
