@@ -1,7 +1,7 @@
 {
-  "name": "clinic-app-root",
+  "name": "clinic-backend",
   "version": "1.0.0",
-  "description": "Clinical Booking System Root",
+  "description": "Backend for Clinical Booking System",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
@@ -18,5 +18,8 @@
   },
   "engines": {
     "node": ">=18"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
   }
 }
