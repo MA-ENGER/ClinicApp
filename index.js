@@ -17,7 +17,7 @@ if (!fs.existsSync(uploadDir)) {
 const app = express();
 const port = process.env.PORT || Number(8080); // Ensure port is a number if possible
 const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_key_123';
-const SERVER_VERSION = '1.1.1-cloud-ping-only';
+const SERVER_VERSION = '1.1.2-cloud-fixed';
 
 console.log('--- SYSTEM STARTUP ---');
 console.log('Version:', SERVER_VERSION);
@@ -901,5 +901,5 @@ app.listen(port, '0.0.0.0', () => {
     console.log(`Address: 0.0.0.0`);
 
     // Connect to DB AFTER we are listening to satisfy health checks
-    // Database connection moved after app.listen for robustness
+    connectWithRetry();
 });
