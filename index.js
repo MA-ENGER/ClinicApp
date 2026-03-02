@@ -79,16 +79,27 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage: storage });
 
-// Database Connection with Retry Logic
-const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    user: process.env.POSTGRES_USER,
-    host: process.env.DB_HOST || 'localhost',
-    database: process.env.POSTGRES_DB,
-    password: process.env.POSTGRES_PASSWORD,
-    port: process.env.DB_PORT || 5432,
-    ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
-});
+// Database Connection with cloud-first priority
+let poolConfig = {};
+if (process.env.DATABASE_URL) {
+    console.log('System: Using DATABASE_URL connection');
+    poolConfig = {
+        connectionString: process.env.DATABASE_URL,
+        ssl: { rejectUnauthorized: false }
+    };
+} else {
+    console.log('System: Using local variables connection');
+    poolConfig = {
+        user: process.env.POSTGRES_USER,
+        host: process.env.DB_HOST || 'localhost',
+        database: process.env.POSTGRES_DB,
+        password: process.env.POSTGRES_PASSWORD,
+        port: process.env.DB_PORT || 5432,
+        ssl: false
+    };
+}
+
+const pool = new Pool(poolConfig);
 
 const connectWithRetry = () => {
     pool.query('SELECT NOW()', (err, res) => {
