@@ -15,6 +15,14 @@ if (!fs.existsSync(uploadDir)) {
 }
 
 const app = express();
+const server = require('http').createServer(app);
+const io = require('socket.io')(server, {
+    cors: {
+        origin: '*',
+        methods: ['GET', 'POST']
+    }
+});
+
 const port = process.env.PORT || Number(8080); // Ensure port is a number if possible
 const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_key_123';
 const SERVER_VERSION = '1.1.2-cloud-fixed';
@@ -470,6 +478,129 @@ app.put('/api/appointments/:id', async (req, res) => {
     }
 });
 
+// --- CHAT & MESSAGING ROUTES ---
+
+// 1. Get History between 2 users
+app.get('/api/messages/:user1/:user2', async (req, res) => {
+    const { user1, user2 } = req.params;
+    try {
+        const result = await pool.query(`
+            SELECT * FROM messages 
+            WHERE (sender_id = $1 AND receiver_id = $2) 
+               OR (sender_id = $2 AND receiver_id = $1)
+            ORDER BY created_at ASC
+        `, [user1, user2]);
+        res.json(result.rows);
+    } catch (err) {
+        res.status(500).json({ error: 'Chat load error: ' + err.message });
+    }
+});
+
+// 2. Get Conversations List for a User
+app.get('/api/messages/conversations/:userId', async (req, res) => {
+    const { userId } = req.params;
+    try {
+        const result = await pool.query(`
+            WITH LastMessages AS (
+                SELECT 
+                    CASE WHEN sender_id = $1 THEN receiver_id ELSE sender_id END as peer_id,
+                    content, created_at, status,
+                    ROW_NUMBER() OVER(PARTITION BY CASE WHEN sender_id = $1 THEN receiver_id ELSE sender_id END ORDER BY created_at DESC) as rn
+                FROM messages
+                WHERE sender_id = $1 OR receiver_id = $1
+            )
+            SELECT 
+                lm.peer_id as "peerId", 
+                u.phone_number as "peerPhone",
+                COALESCE(d.full_name, p.full_name) as "peerName",
+                COALESCE(d.profile_image_url, NULL) as "peerImage",
+                lm.content as "lastMessage",
+                lm.created_at as "timestamp",
+                lm.status
+            FROM LastMessages lm
+            JOIN users u ON lm.peer_id = u.id
+            LEFT JOIN doctors d ON u.id = d.user_id
+            LEFT JOIN patients p ON u.id = p.user_id
+            WHERE lm.rn = 1
+            ORDER BY lm.created_at DESC;
+        `, [userId]);
+        res.json(result.rows);
+    } catch (err) {
+        res.status(500).json({ error: 'Conversations load error: ' + err.message });
+    }
+});
+
+// 3. Mark messages as seen
+app.put('/api/messages/read', async (req, res) => {
+    const { senderId, receiverId } = req.body;
+    try {
+        await pool.query(
+            "UPDATE messages SET status = 'seen' WHERE sender_id = $1 AND receiver_id = $2 AND status = 'sent'",
+            [senderId, receiverId]
+        );
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// --- SOCKET.IO REAL-TIME LOGIC ---
+io.on('connection', (socket) => {
+    console.log('User connected to Sockets:', socket.id);
+
+    // Join a private room for the user ID
+    socket.on('join-chat', (userId) => {
+        socket.join(userId);
+        console.log(`Socket ${socket.id} joined room (UserId): ${userId}`);
+    });
+
+    // Handle sending message
+    socket.on('send-message', async (msgData) => {
+        const { senderId, receiverId, content, type = 'text' } = msgData;
+        console.log('Socket Message:', senderId, '->', receiverId);
+
+        try {
+            // 🔒 RULE: Must have an appointment to chat
+            const bookingCheck = await pool.query(`
+                SELECT 1 FROM appointments 
+                WHERE (doctor_id = (SELECT id FROM doctors WHERE user_id = $1 OR id = $1 LIMIT 1) 
+                  AND patient_id = (SELECT id FROM patients WHERE user_id = $2 OR id = $2 LIMIT 1))
+                OR (doctor_id = (SELECT id FROM doctors WHERE user_id = $2 OR id = $2 LIMIT 1) 
+                  AND patient_id = (SELECT id FROM patients WHERE user_id = $1 OR id = $1 LIMIT 1))
+                LIMIT 1
+            `, [senderId, receiverId]);
+
+            if (bookingCheck.rows.length === 0) {
+                return socket.emit('error-msg', 'You must have a scheduled appointment to message this user.');
+            }
+
+            // Save to Database
+            const res = await pool.query(
+                "INSERT INTO messages (sender_id, receiver_id, content, type, status) VALUES ($1, $2, $3, $4, 'sent') RETURNING *",
+                [senderId, receiverId, content, type]
+            );
+
+            const savedMsg = res.rows[0];
+
+            // Emit to both sender and receiver rooms
+            io.to(senderId).to(receiverId).emit('new-message', savedMsg);
+
+        } catch (err) {
+            console.error('Socket Message Error:', err.message);
+        }
+    });
+
+    // Handle typing status
+    socket.on('typing', ({ senderId, receiverId, isTyping }) => {
+        io.to(receiverId).emit('typing-status', { senderId, isTyping });
+    });
+
+    socket.on('disconnect', () => {
+        console.log('User disconnected from Sockets');
+    });
+});
+
+
 // --- DOCTOR SCHEDULE SETTINGS ---
 
 // Get Doctor Settings
@@ -797,8 +928,8 @@ app.get('/api/health', async (req, res) => {
 
 app.get('/', (req, res) => res.send('Clinic API is running...'));
 
-app.listen(port, '0.0.0.0', () => {
-    console.log(`--- CLOUD SERVER LIVE ---`);
+server.listen(port, '0.0.0.0', () => {
+    console.log(`--- CLOUD SERVER LIVE (WITH SOCKETS) ---`);
     console.log(`Port: ${port}`);
     console.log(`Address: 0.0.0.0`);
 
