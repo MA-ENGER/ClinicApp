@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { StyleSheet, Text, View, TextInput, TouchableOpacity, ScrollView, SafeAreaView, Dimensions, Alert, Image, Modal, ActivityIndicator, Platform, LayoutAnimation, UIManager, Animated } from 'react-native';
-import { User, Lock, Calendar, Stethoscope, ChevronRight, ChevronLeft, MapPin, Hospital, Clock, Info, DollarSign, Search, Camera, Globe, Trash2, Edit3, X, ArrowRight, MessageSquare, Star, BadgeCheck, Trophy, Briefcase, Settings, Bell, Shield, HelpCircle, LogOut, Monitor, Sun, Moon, Palette, Heart, Baby, Brain, Eye, Bone, Activity, Tooth, CheckCircle, AlertTriangle } from 'lucide-react-native';
+import { User, Lock, Calendar, Stethoscope, ChevronRight, ChevronLeft, MapPin, Hospital, Clock, Info, DollarSign, Search, Camera, Globe, Trash2, Edit3, X, ArrowRight, MessageSquare, Star, BadgeCheck, Trophy, Briefcase, Settings, Bell, Shield, HelpCircle, LogOut, Monitor, Sun, Moon, Palette, Heart, Baby, Brain, Eye, Bone, Activity, Tooth, CheckCircle, AlertTriangle, Phone } from 'lucide-react-native';
 import axios from 'axios';
 import * as ImagePicker from 'expo-image-picker';
+import { io } from "socket.io-client";
 
 const { width } = Dimensions.get('window');
 const API_URL = 'https://loyal-insight-production.up.railway.app/api'; // Production server
@@ -578,6 +579,10 @@ export default function App() {
         start_work: "09:00",
         end_work: "17:00"
     });
+    const [socket, setSocket] = useState(null);
+    const [isTyping, setIsTyping] = useState(false);
+    const [typingPeer, setTypingPeer] = useState(null);
+
     const [toast, setToast] = useState({ visible: false, message: '', type: 'success' });
     const showToast = (message, type = 'success') => {
         setToast({ visible: true, message, type });
@@ -610,6 +615,47 @@ export default function App() {
     useEffect(() => {
         loadDoctors();
     }, []);
+
+    useEffect(() => {
+        if (!userId) {
+            if (socket) socket.disconnect();
+            return;
+        }
+
+        const newSocket = io(API_URL.replace('/api', ''), {
+            transports: ['websocket']
+        });
+
+        newSocket.on('connect', () => {
+            console.log('Socket Connected!');
+            newSocket.emit('join-chat', userId);
+        });
+
+        newSocket.on('new-message', (msg) => {
+            setChatHistory((prev) => {
+                // Only add if it's the current selected conversation
+                const isRelevant = String(msg.sender_id) === String(selectedConversation?.peerId) ||
+                    String(msg.receiver_id) === String(selectedConversation?.peerId);
+                return isRelevant ? [...prev, msg] : prev;
+            });
+            // Always refresh conversations list to show last message
+            loadConversations(userId);
+        });
+
+        newSocket.on('typing-status', ({ senderId, isTyping }) => {
+            if (String(senderId) === String(selectedConversation?.peerId)) {
+                setIsTyping(isTyping);
+            }
+        });
+
+        newSocket.on('error-msg', (errMsg) => {
+            Alert.alert('Chat Error', errMsg);
+        });
+
+        setSocket(newSocket);
+
+        return () => newSocket.close();
+    }, [userId, selectedConversation]);
 
     const doctorTypes = [
         'General Practitioner', 'Cardiologist', 'Dermatologist', 'Pediatrician', 'Neurologist',
@@ -972,22 +1018,57 @@ export default function App() {
         try {
             const res = await axios.get(`${API_URL}/messages/${userId}/${targetId}`);
             setChatHistory(res.data);
+            // Mark as read
+            await axios.put(`${API_URL}/messages/read`, { senderId: targetId, receiverId: userId });
+            loadConversations();
         } catch (e) { console.error('History load failed', e); }
     };
 
-    const sendMessage = async () => {
-        if (!messageInput.trim() || !selectedConversation) return;
-        try {
-            const payload = {
+    const sendMessage = async (content = messageInput, type = 'text') => {
+        if (!content.trim() || !selectedConversation || !socket) return;
+
+        socket.emit('send-message', {
+            senderId: userId,
+            receiverId: selectedConversation.peerId,
+            content: content,
+            type: type
+        });
+
+        setMessageInput('');
+        socket.emit('typing', { senderId: userId, receiverId: selectedConversation.peerId, isTyping: false });
+    };
+
+    const handleTyping = (text) => {
+        setMessageInput(text);
+        if (socket && selectedConversation) {
+            socket.emit('typing', {
                 senderId: userId,
                 receiverId: selectedConversation.peerId,
-                content: messageInput
-            };
-            const res = await axios.post(`${API_URL}/messages`, payload);
-            setChatHistory([...chatHistory, res.data]);
-            setMessageInput('');
-            loadConversations();
-        } catch (e) { Alert.alert('Error', 'Message failed to send'); }
+                isTyping: text.length > 0
+            });
+        }
+    };
+
+    const pickChatImage = async () => {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = 'image/*';
+        input.onchange = async (e) => {
+            const file = e.target.files[0];
+            if (file) {
+                const formData = new FormData();
+                formData.append('image', file);
+                try {
+                    const response = await axios.post(`${API_URL.replace('/api', '')}/api/upload`, formData, {
+                        headers: { 'Content-Type': 'multipart/form-data' }
+                    });
+                    sendMessage(response.data.imageUrl, 'image');
+                } catch (error) {
+                    Alert.alert('Upload Failed', error.message);
+                }
+            }
+        };
+        input.click();
     };
 
     return (
@@ -2083,7 +2164,29 @@ export default function App() {
                                                         {loading ? 'Securing Appointment...' : (selectedSlot ? `Confirm for ${selectedSlot}` : 'Select a Time Slot')}
                                                     </Text>
                                                 </TouchableOpacity>
+
+                                                {(userRole === 'PATIENT' && appointments.some(a => String(a.doctor_id) === String(selectedDoctor.id || selectedDoctor.user_id))) && (
+                                                    <TouchableOpacity
+                                                        onPress={() => {
+                                                            const peerId = selectedDoctor.user_id || selectedDoctor.id;
+                                                            setSelectedConversation({
+                                                                peerId: peerId,
+                                                                peerName: selectedDoctor.full_name,
+                                                                peerImage: selectedDoctor.profile_image_url
+                                                            });
+                                                            loadChatHistory(peerId);
+                                                            setView('chat');
+                                                        }}
+                                                        style={[styles.secondaryButton, { marginTop: 12, borderColor: COLORS.secondary, borderStyle: 'solid' }]}
+                                                    >
+                                                        <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                                                            <MessageSquare size={18} color={COLORS.secondary} style={{ marginRight: 10 }} />
+                                                            <Text style={[styles.secondaryButtonText, { color: COLORS.secondary }]}>Message Doctor</Text>
+                                                        </View>
+                                                    </TouchableOpacity>
+                                                )}
                                             </View>
+
                                         </View>
                                     )}
                                 </View>
@@ -2096,7 +2199,7 @@ export default function App() {
                     view === 'chat' && (
                         <View style={{ flex: 1, backgroundColor: COLORS.surface }}>
                             {/* Chat Header */}
-                            <View style={{ height: 110, paddingBottom: 10, borderBottomWidth: 0.5, borderBottomColor: COLORS.border, backgroundColor: 'rgba(255,255,255,0.95)', flexDirection: 'row', alignItems: 'flex-end', paddingHorizontal: 20 }}>
+                            <View style={{ height: 110, paddingBottom: 10, borderBottomWidth: 0.5, borderBottomColor: COLORS.border, backgroundColor: COLORS.surface, flexDirection: 'row', alignItems: 'flex-end', paddingHorizontal: 20 }}>
                                 <TouchableOpacity onPress={() => setView('dashboard')} style={{ marginBottom: 10, marginRight: 16 }}>
                                     <ChevronLeft size={28} color={COLORS.secondary} />
                                 </TouchableOpacity>
@@ -2105,13 +2208,16 @@ export default function App() {
                                         {selectedConversation?.peerImage ? <Image source={{ uri: selectedConversation.peerImage }} style={{ width: '100%', height: '100%' }} /> : <User size={20} color={COLORS.secondary} />}
                                     </View>
                                     <View>
-                                        <Text style={{ fontSize: 17, fontWeight: '700' }}>{selectedConversation?.peerName || 'Chat'}</Text>
+                                        <Text style={{ fontSize: 17, fontWeight: '700', color: COLORS.primary }}>{selectedConversation?.peerName || 'Chat'}</Text>
                                         <View style={{ flexDirection: 'row', alignItems: 'center' }}>
                                             <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: COLORS.success, marginRight: 6 }} />
                                             <Text style={{ fontSize: 12, color: COLORS.textSecondary }}>Online</Text>
                                         </View>
                                     </View>
                                 </View>
+                                <TouchableOpacity style={{ marginBottom: 10, width: 40, height: 40, borderRadius: 20, backgroundColor: COLORS.accent, alignItems: 'center', justifyContent: 'center' }}>
+                                    <Phone size={22} color={COLORS.secondary} />
+                                </TouchableOpacity>
                             </View>
 
                             {/* Message List */}
@@ -2122,7 +2228,7 @@ export default function App() {
                                 onContentSizeChange={() => chatScrollViewRef.current?.scrollToEnd({ animated: true })}
                             >
                                 {chatHistory.map((msg, i) => {
-                                    const isMe = String(msg.senderId) === String(userId);
+                                    const isMe = String(msg.sender_id) === String(userId);
                                     return (
                                         <View key={i} style={{
                                             alignSelf: isMe ? 'flex-end' : 'flex-start',
@@ -2131,48 +2237,70 @@ export default function App() {
                                             alignItems: isMe ? 'flex-end' : 'flex-start'
                                         }}>
                                             <View style={{
-                                                backgroundColor: isMe ? COLORS.secondary : (displayMode === 'dark' ? '#334155' : '#E9E9EB'),
-                                                paddingHorizontal: 16,
-                                                paddingVertical: 10,
+                                                backgroundColor: isMe ? COLORS.secondary : (displayMode === 'dark' ? '#262626' : '#F1F5F9'),
+                                                paddingHorizontal: msg.type === 'image' ? 4 : 16,
+                                                paddingVertical: msg.type === 'image' ? 4 : 10,
                                                 borderRadius: 20,
                                                 borderBottomRightRadius: isMe ? 4 : 20,
-                                                borderBottomLeftRadius: isMe ? 20 : 4
+                                                borderBottomLeftRadius: isMe ? 20 : 4,
+                                                shadowColor: '#000',
+                                                shadowOffset: { width: 0, height: 2 },
+                                                shadowOpacity: 0.05,
+                                                shadowRadius: 5
                                             }}>
-                                                <Text style={{ fontSize: 16, color: isMe ? '#FFF' : COLORS.textPrimary, lineHeight: 21 }}>{msg.content}</Text>
+                                                {msg.type === 'image' ? (
+                                                    <Image source={{ uri: msg.content }} style={{ width: 220, height: 220, borderRadius: 16 }} resizeMode="cover" />
+                                                ) : (
+                                                    <Text style={{ fontSize: 16, color: isMe ? '#FFF' : COLORS.primary, lineHeight: 21 }}>{msg.content}</Text>
+                                                )}
                                             </View>
-                                            <Text style={{ fontSize: 10, color: COLORS.textSecondary, marginTop: 4, marginLeft: isMe ? 0 : 4, marginRight: isMe ? 4 : 0 }}>
-                                                {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                                            </Text>
+                                            <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 4 }}>
+                                                {isMe && (
+                                                    <Text style={{ fontSize: 10, color: msg.status === 'seen' ? COLORS.secondary : COLORS.textSecondary, marginRight: 6, fontWeight: '700' }}>
+                                                        {msg.status === 'seen' ? 'Seen' : 'Sent'}
+                                                    </Text>
+                                                )}
+                                                <Text style={{ fontSize: 10, color: COLORS.textSecondary }}>
+                                                    {new Date(msg.created_at || msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                                </Text>
+                                            </View>
                                         </View>
                                     );
                                 })}
+
+                                {isTyping && (
+                                    <View style={{ alignSelf: 'flex-start', backgroundColor: displayMode === 'dark' ? '#262626' : '#F1F5F9', padding: 12, borderRadius: 20, borderBottomLeftRadius: 4 }}>
+                                        <Text style={{ fontSize: 12, color: COLORS.textSecondary, fontStyle: 'italic' }}>Typing...</Text>
+                                    </View>
+                                )}
                             </ScrollView>
 
                             {/* Message Input */}
                             <SafeAreaView style={{ borderTopWidth: 0.5, borderTopColor: COLORS.border, backgroundColor: COLORS.surface }}>
                                 <View style={{ flexDirection: 'row', alignItems: 'center', padding: 12, paddingBottom: Platform.OS === 'ios' ? 0 : 12 }}>
-                                    <TouchableOpacity style={{ marginRight: 12 }}>
+                                    <TouchableOpacity style={{ marginRight: 12 }} onPress={pickChatImage}>
                                         <Camera size={26} color={COLORS.secondary} />
                                     </TouchableOpacity>
-                                    <View style={{ flex: 1, backgroundColor: COLORS.background, borderRadius: 20, paddingHorizontal: 16, paddingVertical: 8, maxHeight: 100, flexDirection: 'row', alignItems: 'center' }}>
+                                    <View style={{ flex: 1, backgroundColor: COLORS.background, borderRadius: 24, paddingHorizontal: 16, paddingVertical: 8, maxHeight: 100, flexDirection: 'row', alignItems: 'center', borderWidth: 1, borderColor: COLORS.border }}>
                                         <TextInput
-                                            placeholder="iMessage"
+                                            placeholder="Type a message..."
                                             placeholderTextColor={COLORS.textSecondary}
-                                            style={{ flex: 1, fontSize: 16, color: COLORS.textPrimary, outlineStyle: 'none' }}
+                                            style={{ flex: 1, fontSize: 16, color: COLORS.primary, outlineStyle: 'none' }}
                                             multiline
                                             value={messageInput}
-                                            onChangeText={setMessageInput}
+                                            onChangeText={handleTyping}
                                         />
                                         {messageInput.trim().length > 0 && (
-                                            <TouchableOpacity onPress={sendMessage}>
-                                                <View style={{ width: 30, height: 30, borderRadius: 15, backgroundColor: COLORS.secondary, alignItems: 'center', justifyContent: 'center' }}>
-                                                    <ChevronRight color="#FFF" size={20} />
+                                            <TouchableOpacity onPress={() => sendMessage()}>
+                                                <View style={{ width: 34, height: 34, borderRadius: 17, backgroundColor: COLORS.secondary, alignItems: 'center', justifyContent: 'center' }}>
+                                                    <ArrowRight color="#FFF" size={20} />
                                                 </View>
                                             </TouchableOpacity>
                                         )}
                                     </View>
                                 </View>
                             </SafeAreaView>
+
                         </View>
                     )
                 }
